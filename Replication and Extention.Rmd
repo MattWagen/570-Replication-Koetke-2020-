@@ -1,0 +1,263 @@
+---
+title: "Replication and Extention"
+author: "Matthew Wagner"
+date: "2025-11-14"
+output: html_document
+---
+```{r}
+#packagesz
+library(rjags)
+library(R2jags)
+library(jagsUI)
+library(R2WinBUGS)
+library(readxl) 
+```
+
+```{r}
+#first read in the data for CO elk
+#copy from form to read all sheets at once
+# Source - https://stackoverflow.com/a
+
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data.frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+
+#use functoin to extract all worksheets, each worksheet is its own df
+CO_herd_data <- read_excel_allsheets("~/Desktop/Thesis/Elk Population Data 2004-2024 copy.xlsx")
+
+#extract function from chat gpt to get dau as its own df
+extract_DAU <- function(dau_number, data_list) {
+  out <- lapply(data_list, function(df) subset(df, DAU == dau_number))
+  do.call(rbind, out)
+}
+
+#run function
+DAU1 <- extract_DAU(1, CO_herd_data)
+DAU2 <- extract_DAU(2, CO_herd_data)
+DAU21 <- extract_DAU(21, CO_herd_data)
+DAU47 <- extract_DAU(47, CO_herd_data)
+
+#calc growth rates per herd
+CsR=rep(NA,20)
+for(i in 1:20){
+  #CsR[i]=(DAU1$Estimate[i+1]/DAU1$Estimate[i])-1
+  CsR[i]=log(DAU1$Estimate[i+1]/DAU1$Estimate[i])
+}
+BeR=rep(NA,20)
+for(i in 1:20){
+  #BeR[i]=(DAU2$Estimate[i+1]/DAU2$Estimate[i])-1
+  BeR[i]=log(DAU2$Estimate[i+1]/DAU2$Estimate[i])
+}
+BmR=rep(NA,20)
+for(i in 1:20){
+  #BmR[i]=(DAU21$Estimate[i+1]/DAU21$Estimate[i])-1
+  BmR[i]=log(DAU21$Estimate[i+1]/DAU21$Estimate[i])
+}
+GrR=rep(NA,20)
+for(i in 1:20){
+  #GrR[i]=(DAU47$Estimate[i+1]/DAU47$Estimate[i])-1
+  GrR[i]=log(DAU47$Estimate[i+1]/DAU47$Estimate[i])
+}
+
+#group pop and growth data for jags
+regdata <- list(CsPop = DAU1$Estimate, CsR = CsR,
+                BePop = DAU2$Estimate, BeR = BeR,
+                BmPop = DAU21$Estimate, BmR = BmR,
+                GrPop = DAU47$Estimate, GrR = GrR)
+```
+
+```{r}
+
+###set up model and paramts and inits for jags
+#model
+sink(file="regression")
+cat(
+    "model {
+
+    #ADDITIVE
+    
+    for(ii in 1:4){
+    alpha[ii]~dnorm(mu.alpha,tau.alpha) 
+    }
+    mu.alpha~dnorm(0,0.001) #uninformative prior for mean rmax across herds
+    tau.alpha<-1/(sigma.alpha*sigma.alpha)
+    sigma.alpha~dunif(0,100)
+    #mu.alpha~dnorm(0.27,0.01) #informative prior for mean rmax across herds, mean drawn from estimates of rmax from literature
+    #tau.alpha<-1/(sigma.alpha*sigma.alpha)
+    #sigma.alpha~dunif(0.01,0.1) #standard deviation representative of variation in estimates of rmax from 
+    #alpha1~dnorm(0,0.001) #NOT random effect
+    #alpha2~dnorm(0,0.001)
+    #alpha3~dnorm(0,0.001)
+    #alpha4~dnorm(0,0.001)
+
+    tau.add1<-1/(sigma.add1*sigma.add1) #uninformative prior for additive variance across time for each herd
+    sigma.add1~dunif(0,100)
+    tau.add2<-1/(sigma.add2*sigma.add2)
+    sigma.add2~dunif(0,100)
+    tau.add3<-1/(sigma.add3*sigma.add3)
+    sigma.add3~dunif(0,100)
+    tau.add4<-1/(sigma.add4*sigma.add4)
+    sigma.add4~dunif(0,100)
+    
+    
+    #MULTIPLICATIVE
+
+    #beta1~dnorm(0,0.001) #uninformative prior for SDD for each herd
+    #beta2~dnorm(0,0.001)
+    #beta3~dnorm(0,0.001)
+    #beta4~dnorm(0,0.001)
+
+    mu.beta1~dnorm(0,0.001)
+    tau.mult1<-1/(sigma.mult1*sigma.mult1)
+    sigma.mult1~dunif(0,100)
+    mu.beta2~dnorm(0,0.001) #uninformative prior for mean SDD for each herd
+    tau.mult2<-1/(sigma.mult2*sigma.mult2) #uninformative prior for multiplicative variance across time for each herd
+    sigma.mult2~dunif(0,100)
+    mu.beta3~dnorm(0,0.001)
+    tau.mult3<-1/(sigma.mult3*sigma.mult3)
+    sigma.mult3~dunif(0,100)
+    mu.beta4~dnorm(0,0.001)
+    tau.mult4<-1/(sigma.mult4*sigma.mult4)
+    sigma.mult4~dunif(0,100)
+    
+    
+    #VARIATION NOT CAPTURED BY MODEL
+
+    tau.be<-1/(sigma.be*sigma.be)
+    sigma.be~dunif(0,100)
+    tau.bm<-1/(sigma.bm*sigma.bm)
+    sigma.bm~dunif(0,100)
+    tau.cs<-1/(sigma.cs*sigma.cs)
+    sigma.cs~dunif(0,100)
+    tau.gr<-1/(sigma.gr*sigma.gr)
+    sigma.gr~dunif(0,100)
+    
+    
+    #MODELS
+
+    for(i in 1:20){
+    BeR[i]~dnorm(mu.be[i],tau.be)
+    #mu.be[i]<-alpha[1]+beta1*BePop[i]
+    #mu.be[i]<-alpha[1]+beta1*BePop[i]+eps.add1[i]
+    eps.add1[i]~dnorm(0,tau.add1)
+    #mu.be[i]<-alpha[1]+beta1[i]*BePop[i]
+    beta1[i]~dnorm(mu.beta1,tau.mult1)
+    mu.be[i]<-alpha[1]+beta1[i]*BePop[i]+eps.add1[i]
+    }
+    
+    for(i in 1:20){
+    BmR[i]~dnorm(mu.bm[i],tau.bm)
+    #mu.bm[i]<-alpha[2]+beta2*BmPop[i]
+    #mu.bm[i]<-alpha[2]+beta2[i]*BmPop[i]
+    mu.bm[i]<-alpha[2]+beta2[i]*BmPop[i]+eps.add2[i]
+    eps.add2[i]~dnorm(0,tau.add2)
+    beta2[i]~dnorm(mu.beta2,tau.mult2)
+    }
+    
+    for(i in 1:20){
+    CsR[i]~dnorm(mu.cs[i],tau.cs)
+    #mu.cs[i]<-alpha[3]+beta3*CsPop[i]
+    #mu.cs[i]<-alpha[3]+beta3[i]*CsPop[i]
+    mu.cs[i]<-alpha[3]+beta3[i]*CsPop[i]+eps.add3[i]
+    eps.add3[i]~dnorm(0,tau.add3)
+    beta3[i]~dnorm(mu.beta3,tau.mult3)
+    }
+    
+    for(i in 1:20){
+    GrR[i]~dnorm(mu.gr[i],tau.gr)
+    #mu.gr[i]<-alpha[4]+beta4*GrPop[i]
+    #mu.gr[i]<-alpha[4]+beta4[i]*GrPop[i]
+    mu.gr[i]<-alpha[4]+beta4[i]*GrPop[i]+eps.add4[i]
+    eps.add4[i]~dnorm(0,tau.add4)
+    beta4[i]~dnorm(mu.beta4,tau.mult4)
+    }
+    
+    }"
+    
+    ,fill=TRUE)
+sink()
+
+#prmamaters to moniter
+params<-c("mu.alpha","sigma.alpha",
+          "alpha",
+          "sigma.add1",
+          "sigma.add2",
+          "sigma.add3",
+          "sigma.add4",
+         # "beta1",
+        #  "beta2",
+         # "beta3",
+          #"beta4",
+        "epps.add1","epps.add2","epps.add3","epps.add4",
+          "mu.beta1","sigma.mult1",
+          "mu.beta2","sigma.mult2",
+          "mu.beta3","sigma.mult3",
+          "mu.beta4","sigma.mult4",
+          "sigma.be","sigma.bm","sigma.cs","sigma.gr")
+#initial value for MCMC 
+inits<-function(){list(mu.alpha=0,sigma.alpha=0.1,
+                       sigma.add1=1,
+                       sigma.add2=1,
+                       sigma.add3=1,
+                       sigma.add4=1,
+                       #beta1=0,
+                       #beta2=0,
+                       #beta3=0,
+                       #beta4=0,
+                       epps.add1=0,epps.add2=0,epps.add3=0,epps.add4=0,
+                       mu.beta1=0,sigma.mult1=1,
+                       mu.beta2=0,sigma.mult2=1,
+                       mu.beta3=0,sigma.mult3=1,
+                       mu.beta4=0,sigma.mult4=1,
+                       sigma.be=1,sigma.bm=1,sigma.cs=1,sigma.gr=1)}
+```
+
+```{r}
+
+#run jags
+fitreg<-jags(data=regdata,inits=inits,parameters.to.save=params,model.file="regression",n.thin=1,
+             #n.chains=2,n.burnin=10,n.iter=40,parallel=FALSE) #use this when testing model
+             n.chains=3,n.burnin=75000,n.iter=150000,n.adapt=75000,parallel=TRUE)
+print(fitreg,5)
+#for reporducliblity can set the seed, so it gens the same random number sequence will use system 
+#here likly use MCMC becasue there is random effects (i.e. climate changes over peroids herd heath changes over peoids)
+
+```
+
+```{r}
+##model fitting
+#re run model setting other herds to no var and calc devince for herd you are checing by doing mean(fitreg$sims.list$deviance)
+ mean(fitreg$sims.list$deviance)
+```
+
+
+```{r}
+#find carying capacites by finding where r = 0
+Bek=(-1*fitreg$sims.list$alpha[,1])/fitreg$sims.list$mu.beta1
+median(Bek)
+quantile(Bek,probs=c(0.025,0.975))
+sd(Bek)
+
+BmK=(-1*fitreg$sims.list$alpha[,2])/fitreg$sims.list$mu.beta2
+median(BmK)
+quantile(BmK,probs=c(0.025,0.975))
+sd(BmK)
+
+CsK=(-1*fitreg$sims.list$alpha[,3])/fitreg$sims.list$mu.beta3
+median(CsK)
+quantile(CsK,probs=c(0.025,0.975))
+sd(CsK)
+
+GrK=(-1*fitreg$sims.list$alpha[,4])/fitreg$sims.list$mu.beta4
+median(GrK)
+quantile(GrK,probs=c(0.025,0.975))
+sd(GrK)
+
+```
