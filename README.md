@@ -8,3 +8,5 @@ Koteke code.R and Koetke et al 2020 data.xlsx contain the code and data for the 
 
 
 To extend this model to Colorado data Elk Population Data 2004-2024 provides the herd data and Replication and Extention.Rmd provides the code. Same process as before expect the data needs to be organized into herd units as its multiple worksheets in one excel work book.
+
+The carrying capacity is defined by dividing our found alpha by the estimated beta. A median value and 95% confidence interval are included  
